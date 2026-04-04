@@ -25,6 +25,7 @@ const envSchema = z.object({
   XOMETRY_STORAGE_STATE: z.string().default("./storage/auth/xometry.json"),
   RAPIDDIRECT_STORAGE_STATE: z.string().default("./storage/auth/rapiddirect.json"),
   PROTOLABS_STORAGE_STATE: z.string().default("./storage/auth/protolabs.json"),
+  TWOCAPTCHA_API_KEY: optionalString,
 });
 
 export function loadEnv(cwd: string): QuoteToolEnv {
@@ -41,6 +42,7 @@ export function loadEnv(cwd: string): QuoteToolEnv {
     XOMETRY_STORAGE_STATE: path.resolve(cwd, parsed.XOMETRY_STORAGE_STATE),
     RAPIDDIRECT_STORAGE_STATE: path.resolve(cwd, parsed.RAPIDDIRECT_STORAGE_STATE),
     PROTOLABS_STORAGE_STATE: path.resolve(cwd, parsed.PROTOLABS_STORAGE_STATE),
+    TWOCAPTCHA_API_KEY: parsed.TWOCAPTCHA_API_KEY,
   };
 }
 
