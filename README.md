@@ -4,6 +4,25 @@ Quoteget is a local-first quoting tool for Atlas.
 
 You give it one STEP file, `aluminum_6061`, and `quantity=1`. It sends that exact file to Hubs, Xometry, RapidDirect, and Protolabs, then returns what each vendor actually says: quoted, manual review required, failed, or not supported.
 
+## Demo
+
+Screen recording of a real CLI run against **Hubs** using the committed sample part [`demo-part.step`](demo-part.step) (10 mm cube STEP).
+
+<video controls muted playsinline width="100%">
+  <source src="docs/demo-quote.mp4" type="video/mp4" />
+</video>
+
+After this recording was made, the Hubs client was updated to **refresh JWT access tokens** during long quote polling (same anonymous session), so multi-minute quotes stay reliable.
+
+In your clone you can play the file directly: [`docs/demo-quote.mp4`](docs/demo-quote.mp4).
+
+Re-record on Linux (needs `xterm`, `xvfb`, `ffmpeg`; see script for details):
+
+```bash
+npm run build
+./scripts/record-demo-x11.sh
+```
+
 ## Quick Start
 
 ```bash
@@ -24,9 +43,9 @@ quote serve
 
 ## Browser Vendor Setup
 
-Xometry, RapidDirect, and Protolabs require stored authenticated Playwright sessions.
+If `./storage/auth/*.json` files are **missing**, the tool creates disposable accounts for **Xometry** and **RapidDirect** in the browser. **Protolabs** still needs either a saved session or `TWOCAPTCHA_API_KEY` for automatic signup (reCAPTCHA on their registration page).
 
-Capture them once:
+You can still capture long-lived sessions once:
 
 ```bash
 node dist/cli.js auth capture --vendor xometry

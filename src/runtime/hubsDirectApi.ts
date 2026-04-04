@@ -68,24 +68,34 @@ export async function runHubsDirectQuote(
     "user-agent": "Mozilla/5.0",
   };
 
-  const jwt = await requestJson<{ data: { access_token: string } }>(
-    `${HUBS_BASE_URL}/api/s/cnc/v1/jwt`,
-    {
-      method: "PATCH",
-      headers: commonHeaders,
-    },
-  );
-  const token = jwt.data.access_token;
-  const authHeaders = {
+  interface HubsJwtBundle {
+    access_token: string;
+    refresh_token: string;
+  }
+
+  async function issueHubsJwt(body: Record<string, unknown> = {}): Promise<HubsJwtBundle> {
+    const issued = await requestJson<{ data: HubsJwtBundle }>(
+      `${HUBS_BASE_URL}/api/s/cnc/v1/jwt`,
+      {
+        method: "PATCH",
+        headers: commonHeaders,
+        body: JSON.stringify(body),
+      },
+    );
+    return issued.data;
+  }
+
+  let { access_token: token, refresh_token: refreshToken } = await issueHubsJwt();
+  const authHeaders = () => ({
     ...commonHeaders,
     authorization: `Bearer ${token}`,
-  };
+  });
 
   const order = await requestJson<{ data: { uuid: string; quote_uuid: string; number: string | null } }>(
     `${HUBS_BASE_URL}/api/s/cnc/orders`,
     {
       method: "POST",
-      headers: authHeaders,
+      headers: authHeaders(),
       body: "{}",
     },
   );
@@ -96,7 +106,7 @@ export async function runHubsDirectQuote(
     `${HUBS_BASE_URL}/api/s/hubspot/form/email_wall`,
     {
       method: "POST",
-      headers: authHeaders,
+      headers: authHeaders(),
       body: JSON.stringify({ email: options.email }),
     },
   );
@@ -105,7 +115,7 @@ export async function runHubsDirectQuote(
     `${HUBS_BASE_URL}/api/s/conversion/anonymous-user-carts`,
     {
       method: "POST",
-      headers: authHeaders,
+      headers: authHeaders(),
       body: JSON.stringify({
         order_uuid: orderUuid,
         anonymous_user_email: options.email,
@@ -122,7 +132,7 @@ export async function runHubsDirectQuote(
     };
   }>(`${HUBS_BASE_URL}/api/s/cnc/upload/post-signature`, {
     method: "POST",
-    headers: authHeaders,
+    headers: authHeaders(),
     body: JSON.stringify({ name: partName }),
   });
 
@@ -153,7 +163,7 @@ export async function runHubsDirectQuote(
     `${HUBS_BASE_URL}/api/s/cnc/upload`,
     {
       method: "POST",
-      headers: authHeaders,
+      headers: authHeaders(),
       body: JSON.stringify({
         file_uuid: fileUuid,
         units,
@@ -170,7 +180,7 @@ export async function runHubsDirectQuote(
     `${HUBS_BASE_URL}/api/s/cnc/quotes/${quoteUuid}/line-items`,
     {
       method: "POST",
-      headers: authHeaders,
+      headers: authHeaders(),
       body: JSON.stringify({
         thickness: null,
         title: partName,
@@ -191,32 +201,42 @@ export async function runHubsDirectQuote(
 
   let quoteData: Record<string, unknown> | null = null;
   let shippingData: ShippingOption[] = [];
+  let jwtRefreshes = 0;
   for (let attempt = 0; attempt < maxPolls; attempt += 1) {
-    const quote = await requestJson<{ data: Record<string, unknown> }>(
-      `${HUBS_BASE_URL}/api/s/cnc/quotes/${quoteUuid}`,
-      {
-        headers: {
-          accept: commonHeaders.accept,
-          authorization: `Bearer ${token}`,
-          referer: commonHeaders.referer,
-          "user-agent": commonHeaders["user-agent"],
-        },
-      },
-    );
-    quoteData = quote.data;
+    const readHeaders = () => ({
+      accept: commonHeaders.accept,
+      authorization: `Bearer ${token}`,
+      referer: commonHeaders.referer,
+      "user-agent": commonHeaders["user-agent"],
+    });
 
-    const shipping = await requestJson<{ data: ShippingOption[] }>(
-      `${HUBS_BASE_URL}/api/s/shipping/shipping-options?quote_uuid=${quoteUuid}`,
-      {
-        headers: {
-          accept: commonHeaders.accept,
-          authorization: `Bearer ${token}`,
-          referer: commonHeaders.referer,
-          "user-agent": commonHeaders["user-agent"],
+    try {
+      const quote = await requestJson<{ data: Record<string, unknown> }>(
+        `${HUBS_BASE_URL}/api/s/cnc/quotes/${quoteUuid}`,
+        {
+          headers: readHeaders(),
         },
-      },
-    );
-    shippingData = shipping.data;
+      );
+      quoteData = quote.data;
+
+      const shipping = await requestJson<{ data: ShippingOption[] }>(
+        `${HUBS_BASE_URL}/api/s/shipping/shipping-options?quote_uuid=${quoteUuid}`,
+        {
+          headers: readHeaders(),
+        },
+      );
+      shippingData = shipping.data;
+    } catch (error) {
+      if (isHubsUnauthorizedError(error) && jwtRefreshes < 12) {
+        const rotated = await issueHubsJwt({ refresh_token: refreshToken });
+        token = rotated.access_token;
+        refreshToken = rotated.refresh_token;
+        jwtRefreshes += 1;
+        attempt -= 1;
+        continue;
+      }
+      throw error;
+    }
 
     const part = findPartLineItem(quoteData, partName);
     const partPrice = part?.display_price ?? part?.auto_price ?? null;
@@ -300,6 +320,11 @@ async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
     throw new Error(`Hubs API ${response.status} for ${url}: ${text.slice(0, 500)}`);
   }
   return JSON.parse(text) as T;
+}
+
+function isHubsUnauthorizedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\bHubs API 401\b/.test(message);
 }
 
 function findPartLineItem(
