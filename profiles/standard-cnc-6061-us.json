@@ -1,0 +1,13 @@
+{
+  "profileId": "standard-cnc-6061-us",
+  "description": "Phase 1 narrow CNC quoting contract.",
+  "process": "cnc",
+  "fileFormat": "step",
+  "material": "aluminum_6061",
+  "finish": "standard",
+  "quantity": 1,
+  "geography": "us",
+  "shipToRegion": "IL",
+  "shipToPostalCode": "60611",
+  "preferredLeadTime": "standard"
+}
