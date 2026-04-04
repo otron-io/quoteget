@@ -30,11 +30,16 @@ export class XometryAdapter extends BrowserVendorAdapter {
         id: "upload-cad",
         description: "Upload the STEP file.",
         run: async () => {
+          const textBefore = await ctx.runtime.visibleText();
+          if (/Upload a 3D model to see instant pricing/i.test(textBefore)) {
+            await ctx.runtime.page.getByRole("button", { name: /Upload 3D Files/i }).nth(1).click().catch(() => undefined);
+            await ctx.runtime.page.waitForTimeout(400);
+          }
           const uploaded = await ctx.runtime.uploadPart(ctx.execution.inputFilePath);
           if (!uploaded) {
             return failed("Upload input not found.", "upload_input_missing");
           }
-          await ctx.runtime.page.waitForTimeout(3000);
+          await ctx.runtime.page.waitForTimeout(6000);
           const text = await ctx.runtime.visibleText();
           if (/There was an error, please try again\./i.test(text)) {
             return failed(
@@ -56,7 +61,10 @@ export class XometryAdapter extends BrowserVendorAdapter {
               "upload_did_not_advance",
             );
           }
-          if (/sign in|sign up|create account|email/i.test(text)) {
+          if (
+            /sign in to continue|log in to continue|create your account to continue/i.test(text) ||
+            /login\.xometry\.com/i.test(ctx.runtime.page.url())
+          ) {
             return failed(
               "Xometry is still showing an account gate.",
               "auth_blocked",

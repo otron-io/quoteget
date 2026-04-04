@@ -129,6 +129,8 @@ export interface QuoteToolEnv {
   XOMETRY_STORAGE_STATE: string;
   RAPIDDIRECT_STORAGE_STATE: string;
   PROTOLABS_STORAGE_STATE: string;
+  /** When set, Protolabs signup (reCAPTCHA) can be solved automatically for fresh sessions. */
+  TWOCAPTCHA_API_KEY?: string;
   artifactRootAbs: string;
   storageRootAbs: string;
 }

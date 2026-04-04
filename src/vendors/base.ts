@@ -13,6 +13,11 @@ import type {
   VendorQuoteResult,
   VendorStatus,
 } from "../core/types.js";
+import {
+  ensureProtolabsEphemeralSession,
+  ensureRapidDirectEphemeralSession,
+  ensureXometryEphemeralSession,
+} from "../runtime/ephemeralSessions.js";
 import { PlaywrightQuoteRuntime } from "../runtime/playwrightRuntime.js";
 
 export interface VendorAdapter<
@@ -113,26 +118,48 @@ export abstract class BrowserVendorAdapter
     ]);
     const normalizedConfig = buildVendorNormalizedConfig(execution.request, this.vendor);
     const storageStatePath = this.storageStatePath(execution.env);
-    if (!storageStateExists(storageStatePath)) {
-      await collector.writeJson("preflight-error", {
-        failureCode: "session_missing",
-        storageStatePath,
-      });
-      throw new VendorFailure(
-        "session_missing",
-        `Missing browser storage state for ${this.vendor}.`,
-      );
-    }
+    const hasSavedSession = storageStateExists(storageStatePath);
 
     const runtime = await PlaywrightQuoteRuntime.create(
       {
         vendor: this.vendor,
         baseUrl: this.baseUrl,
-        storageStatePath,
+        storageStatePath: hasSavedSession ? storageStatePath : undefined,
         headed: execution.env.QUOTE_TOOL_HEADED,
       },
       collector,
     );
+
+    if (!hasSavedSession) {
+      try {
+        if (this.vendor === "rapiddirect") {
+          await ensureRapidDirectEphemeralSession(runtime);
+        } else if (this.vendor === "xometry") {
+          await ensureXometryEphemeralSession(runtime);
+        } else if (this.vendor === "protolabs") {
+          const key = execution.env.TWOCAPTCHA_API_KEY;
+          if (!key) {
+            throw new VendorFailure(
+              "session_missing",
+              "Missing browser storage state for protolabs and no TWOCAPTCHA_API_KEY is set for automatic signup.",
+            );
+          }
+          await ensureProtolabsEphemeralSession(runtime, key);
+        }
+      } catch (error) {
+        await collector.writeJson("preflight-error", {
+          failureCode: "ephemeral_session_failed",
+          storageStatePath,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        throw error instanceof VendorFailure
+          ? error
+          : new VendorFailure(
+              "ephemeral_session_failed",
+              error instanceof Error ? error.message : String(error),
+            );
+      }
+    }
 
     const prepared: BrowserPreparedContext = {
       execution,

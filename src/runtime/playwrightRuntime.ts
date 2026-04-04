@@ -14,7 +14,8 @@ function moneyTokensFromText(text: string): number[] {
 export interface BrowserSessionConfig {
   vendor: string;
   baseUrl: string;
-  storageStatePath: string;
+  /** When missing or the file does not exist, the browser starts without a saved session. */
+  storageStatePath?: string;
   headed: boolean;
 }
 
@@ -36,18 +37,24 @@ export class PlaywrightQuoteRuntime {
     artifacts: ArtifactCollector,
   ): Promise<PlaywrightQuoteRuntime> {
     const storageState =
-      (await fileExists(config.storageStatePath)) ? config.storageStatePath : undefined;
-    if (!storageState) {
-      throw new Error(`Missing browser storage state at ${config.storageStatePath}`);
-    }
+      config.storageStatePath && (await fileExists(config.storageStatePath))
+        ? config.storageStatePath
+        : undefined;
 
     const browser = await chromium.launch({
       headless: !config.headed,
+      args: ["--disable-blink-features=AutomationControlled"],
     });
     const context = await browser.newContext({
-      storageState,
+      ...(storageState ? { storageState } : {}),
       acceptDownloads: true,
       locale: "en-US",
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      viewport: { width: 1920, height: 1080 },
+    });
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
     });
     await context.tracing.start({ screenshots: true, snapshots: true });
     const page = await context.newPage();
@@ -57,7 +64,8 @@ export class PlaywrightQuoteRuntime {
     await artifacts.writeJson("session", {
       vendor: config.vendor,
       baseUrl: config.baseUrl,
-      storageStatePath: config.storageStatePath,
+      storageStatePath: config.storageStatePath ?? null,
+      storageStateLoaded: Boolean(storageState),
       headed: config.headed,
     });
     return runtime;
