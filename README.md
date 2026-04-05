@@ -6,13 +6,13 @@ You give it one STEP file, `aluminum_6061`, and `quantity=1`. It sends that exac
 
 ## Demo
 
-Screen recording of a real CLI run against **Hubs** using the committed sample part [`demo-part.step`](demo-part.step) (10 mm cube STEP).
+Terminal capture of a CLI run against **Hubs** using the sample part [`demo-part.step`](demo-part.step) (10 mm cube STEP). The command in the recording is `node dist/cli.js ./demo-part.step --vendors hubs --json` (JSON output pretty-printed).
 
 <video controls muted playsinline width="100%">
   <source src="docs/demo-quote.mp4" type="video/mp4" />
 </video>
 
-After this recording was made, the Hubs client was updated to **refresh JWT access tokens** during long quote polling (same anonymous session), so multi-minute quotes stay reliable.
+The Hubs integration **refreshes JWT access tokens** during long quote polling (same anonymous session), so multi-minute quotes stay reliable.
 
 In your clone you can play the file directly: [`docs/demo-quote.mp4`](docs/demo-quote.mp4).
 
