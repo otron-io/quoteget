@@ -1,115 +1,60 @@
-import { browserStorageStateMap } from "../config/env.js";
-import type { BrowserPreparedContext, BrowserVendorStep } from "./base.js";
-import {
-  BrowserVendorAdapter,
-  failed,
-  rememberPriceSignals,
-  success,
-} from "./base.js";
+import type { FakeIdentity } from "../core/fakeIdentity.js";
+import type { AgentPreparedContext, AgentQuoteTask, AgentSignupTask } from "./agentBase.js";
+import { AgentVendorAdapter } from "./agentBase.js";
 
-export class XometryAdapter extends BrowserVendorAdapter {
+export class XometryAdapter extends AgentVendorAdapter {
   readonly vendor = "xometry" as const;
-  readonly baseUrl = "https://www.xometry.com/quoting/home/";
 
-  protected storageStatePath(env: BrowserPreparedContext["execution"]["env"]): string {
-    return browserStorageStateMap(env).xometry;
+  protected buildAgentTask(ctx: AgentPreparedContext): AgentQuoteTask {
+    const { quantity } = ctx.execution.request;
+    const { material } = ctx.normalizedConfig;
+
+    return {
+      startUrl: "https://www.xometry.com/quoting/home/",
+      instruction: `
+You are getting a CNC machining quote on Xometry (xometry.com).
+
+Goal: upload the part file, configure it for CNC machining with ${material} material and quantity ${quantity}, and get a price in USD.
+
+Important notes:
+- If you see a login or sign-in page at any point, stop and report "Authentication required."
+- The file upload will be handled automatically when you trigger the file chooser — just click the upload area and wait.
+- If an export control question appears, answer that the part is not export-controlled.
+- After the file is uploaded and the configuration page loads, verify process, material, and quantity are correct, then wait for the price.
+
+Report: total price in USD, lead time in business days, material confirmed.
+If you see "Request a Quote" or "Contact Us" instead of a price: report "Manual review required: RFQ needed."
+If no price appears after configuration: describe exactly what you see.
+      `.trim(),
+      maxSteps: 45,
+    };
   }
 
-  protected buildSteps(ctx: BrowserPreparedContext): BrowserVendorStep[] {
-    return [
-      {
-        id: "open-quote-home",
-        description: "Open Xometry quoting home.",
-        run: async () => {
-          await ctx.runtime.goto(this.baseUrl);
-          await ctx.runtime.dismissCommonPopups();
-          return success("Opened Xometry quoting home.");
-        },
-      },
-      {
-        id: "upload-cad",
-        description: "Upload the STEP file.",
-        run: async () => {
-          const textBefore = await ctx.runtime.visibleText();
-          if (/Upload a 3D model to see instant pricing/i.test(textBefore)) {
-            await ctx.runtime.page.getByRole("button", { name: /Upload 3D Files/i }).nth(1).click().catch(() => undefined);
-            await ctx.runtime.page.waitForTimeout(400);
-          }
-          const uploaded = await ctx.runtime.uploadPart(ctx.execution.inputFilePath);
-          if (!uploaded) {
-            return failed("Upload input not found.", "upload_input_missing");
-          }
-          await ctx.runtime.page.waitForTimeout(6000);
-          const text = await ctx.runtime.visibleText();
-          if (/There was an error, please try again\./i.test(text)) {
-            return failed(
-              "Xometry reported an upload error immediately after file selection.",
-              "upload_rejected",
-            );
-          }
-          return success("Uploaded CAD file.");
-        },
-      },
-      {
-        id: "auth-gate",
-        description: "Verify authenticated session.",
-        run: async () => {
-          const text = await ctx.runtime.visibleText();
-          if (/Upload a 3D model to see instant pricing/i.test(text)) {
-            return failed(
-              "Xometry remained on the public upload landing page after file selection.",
-              "upload_did_not_advance",
-            );
-          }
-          if (
-            /sign in to continue|log in to continue|create your account to continue/i.test(text) ||
-            /login\.xometry\.com/i.test(ctx.runtime.page.url())
-          ) {
-            return failed(
-              "Xometry is still showing an account gate.",
-              "auth_blocked",
-            );
-          }
-          return success("No auth gate detected.");
-        },
-      },
-      {
-        id: "export-control",
-        description: "Answer export-control questions if present.",
-        run: async () => {
-          await ctx.runtime.clickSelector(
-            [
-              'button:has-text("No")',
-              'button:has-text("Not controlled")',
-              'button:has-text("Continue")',
-            ],
-            "Answer export-control prompts conservatively.",
-          );
-          await ctx.runtime.dismissCommonPopups();
-          return success("Export-control prompt handled if present.");
-        },
-      },
-      {
-        id: "extract-subtotal",
-        description: "Capture a stable Xometry subtotal.",
-        run: async () => {
-          const text = await ctx.runtime.visibleText();
-          const tokens = await ctx.runtime.collectMoneyTokens();
-          rememberPriceSignals(ctx, text, tokens);
-          if (/Aluminum 6061/i.test(text)) {
-            ctx.addExtraction({ material: "Aluminum 6061" });
-          }
+  protected async beforeAgent(ctx: AgentPreparedContext): Promise<void> {
+    // Register interceptor — whenever a file chooser opens (triggered by agent click), auto-accept with our file
+    ctx.runtime.registerFileChooserInterceptor(ctx.execution.inputFilePath);
+  }
 
-          if (ctx.extraction.price !== undefined) {
-            if (/standard/i.test(text)) {
-              ctx.addExtraction({ leadTime: "standard" });
-            }
-            return success("Captured Xometry price signals.");
-          }
+  protected buildSignupTask(identity: FakeIdentity): AgentSignupTask {
+    return {
+      startUrl: "https://www.xometry.com/register/",
+      confirmUrl: "https://www.xometry.com/quoting/home/",
+      instruction: `
+Create an account on Xometry.
 
-          return failed("No stable subtotal was found on Xometry.", "price_missing");
-        },
-      },
-    ];
+Fill in the registration form with:
+- First name: %firstName%
+- Last name: %lastName%
+- Email: %email%
+- Company: %company%
+- Phone: %phone%
+- Password: %password%
+
+Select "Buyer" or "Customer" as the account type if asked.
+Submit the form.
+If a verification step appears that requires email access, stop and report "Email verification required."
+`.trim(),
+      maxSteps: 30,
+    };
   }
 }

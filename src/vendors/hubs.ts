@@ -1,4 +1,5 @@
 import { ArtifactCollector } from "../core/artifactStore.js";
+import { DEFAULT_MATERIAL, getMaterialDefinition } from "../core/materials.js";
 import { buildVendorNormalizedConfig } from "../core/normalizer.js";
 import type {
   VendorExecutionContext,
@@ -24,6 +25,11 @@ export class HubsAdapter implements VendorAdapter<PreparedHubsContext, HubsDirec
   }
 
   async quote(ctx: PreparedHubsContext): Promise<HubsDirectQuoteRawResult> {
+    const requestedMaterial = getMaterialDefinition(ctx.execution.request.material);
+    const materialSubsetId = ctx.execution.request.material === DEFAULT_MATERIAL
+      ? ctx.execution.env.HUBS_MATERIAL_SUBSET_ID
+      : requestedMaterial.hubs.subsetId;
+
     return runHubsDirectQuote({
       partPath: ctx.execution.inputFilePath,
       quoteProfileId: "standard-cnc-6061-us",
@@ -34,13 +40,15 @@ export class HubsAdapter implements VendorAdapter<PreparedHubsContext, HubsDirec
       units: ctx.execution.env.HUBS_UNITS,
       quantity: ctx.execution.request.quantity,
       finishSlug: ctx.execution.env.HUBS_FINISH_SLUG,
-      materialSubsetId: ctx.execution.env.HUBS_MATERIAL_SUBSET_ID,
+      materialSubsetId,
       technologyId: ctx.execution.env.HUBS_TECHNOLOGY_ID,
     });
   }
 
   async classify(raw: HubsDirectQuoteRawResult, ctx: PreparedHubsContext): Promise<VendorQuoteResult> {
-    return {
+    const expectedMaterialSlug = ctx.normalizedConfig.material;
+    const requestedMaterial = getMaterialDefinition(ctx.execution.request.material);
+    const result: VendorQuoteResult = {
       vendor: this.vendor,
       status: raw.status,
       price: raw.price,
@@ -56,6 +64,21 @@ export class HubsAdapter implements VendorAdapter<PreparedHubsContext, HubsDirec
         files: [...ctx.collector.files],
       },
     };
+
+    if (
+      result.status === "quoted" &&
+      raw.materialSubsetSlug &&
+      raw.materialSubsetSlug !== expectedMaterialSlug
+    ) {
+      return {
+        ...result,
+        status: "manual_review_required",
+        error: `Hubs priced the part with ${raw.materialSubsetName ?? raw.materialSubsetSlug} instead of ${requestedMaterial.label}.`,
+        failureCode: "material_mismatch",
+      };
+    }
+
+    return result;
   }
 
   async collectArtifacts(
@@ -92,6 +115,7 @@ export class HubsAdapter implements VendorAdapter<PreparedHubsContext, HubsDirec
         vendor: this.vendor,
         status: failure.status,
         error: failure.message,
+        failureCode: failure.code,
         integrationTier: this.integrationTier,
         normalizedConfig: prepared.normalizedConfig,
         artifactRef: {

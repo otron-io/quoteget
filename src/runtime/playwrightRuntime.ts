@@ -1,7 +1,11 @@
-import { access } from "node:fs/promises";
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { access, readFile } from "node:fs/promises";
+import path from "node:path";
+import { chromium, type Browser, type BrowserContext, type CDPSession, type Page } from "playwright";
 
+import type { QuoteToolEnv } from "../core/types.js";
 import type { ArtifactCollector } from "../core/artifactStore.js";
+import type { BrowserSessionDescriptor } from "./browserSessionStore.js";
+import { createBrowserbaseSession, uploadFileToBrowserbaseSession, type BrowserbaseSession } from "./browserbase.js";
 
 function moneyTokensFromText(text: string): number[] {
   const matches =
@@ -14,9 +18,10 @@ function moneyTokensFromText(text: string): number[] {
 export interface BrowserSessionConfig {
   vendor: string;
   baseUrl: string;
-  /** When missing or the file does not exist, the browser starts without a saved session. */
-  storageStatePath?: string;
+  env: QuoteToolEnv;
+  session: BrowserSessionDescriptor;
   headed: boolean;
+  runtimeProvider: "local" | "browserbase";
 }
 
 export class PlaywrightQuoteRuntime {
@@ -25,48 +30,103 @@ export class PlaywrightQuoteRuntime {
   readonly page: Page;
   readonly networkEvents: Array<Record<string, unknown>> = [];
   readonly actionLog: Array<Record<string, unknown>> = [];
+  readonly runtimeProvider: "local" | "browserbase";
+  readonly session: BrowserSessionDescriptor;
+  readonly env: QuoteToolEnv;
 
-  private constructor(browser: Browser, context: BrowserContext, page: Page) {
+  private readonly browserbaseSession?: BrowserbaseSession;
+  private cdpSession?: CDPSession;
+
+  private constructor(
+    browser: Browser,
+    context: BrowserContext,
+    page: Page,
+    runtimeProvider: "local" | "browserbase",
+    session: BrowserSessionDescriptor,
+    env: QuoteToolEnv,
+    browserbaseSession?: BrowserbaseSession,
+  ) {
     this.browser = browser;
     this.context = context;
     this.page = page;
+    this.runtimeProvider = runtimeProvider;
+    this.session = session;
+    this.env = env;
+    this.browserbaseSession = browserbaseSession;
   }
 
   static async create(
     config: BrowserSessionConfig,
     artifacts: ArtifactCollector,
   ): Promise<PlaywrightQuoteRuntime> {
-    const storageState =
-      config.storageStatePath && (await fileExists(config.storageStatePath))
-        ? config.storageStatePath
-        : undefined;
+    let browser: Browser;
+    let context: BrowserContext;
+    let page: Page;
+    let browserbaseSession: BrowserbaseSession | undefined;
 
-    const browser = await chromium.launch({
-      headless: !config.headed,
-      args: ["--disable-blink-features=AutomationControlled"],
-    });
-    const context = await browser.newContext({
-      ...(storageState ? { storageState } : {}),
-      acceptDownloads: true,
-      locale: "en-US",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      viewport: { width: 1920, height: 1080 },
-    });
+    if (config.runtimeProvider === "browserbase") {
+      browserbaseSession = await createBrowserbaseSession(config.env, {
+        vendor: config.vendor,
+        mode: config.session.mode,
+      });
+      browser = await chromium.connectOverCDP(browserbaseSession.connectUrl);
+      context = browser.contexts()[0]!;
+      if (!context) {
+        throw new Error("Browserbase session did not expose a default browser context.");
+      }
+      page = context.pages()[0] ?? await context.newPage();
+    } else {
+      const storageStatePath = config.session.storageStatePath;
+      if (config.session.mode === "authenticated_session" && !storageStatePath) {
+        throw new Error(`Missing browser storage state for ${config.vendor}.`);
+      }
+      const storageState =
+        storageStatePath && (await fileExists(storageStatePath)) ? storageStatePath : undefined;
+
+      browser = await chromium.launch({
+        headless: !config.headed,
+        args: ["--disable-blink-features=AutomationControlled"],
+      });
+      context = await browser.newContext({
+        storageState,
+        acceptDownloads: true,
+        locale: "en-US",
+        userAgent:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        viewport: { width: 1920, height: 1080 },
+      });
+      page = await context.newPage();
+    }
+
     await context.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-    });
-    await context.tracing.start({ screenshots: true, snapshots: true });
-    const page = await context.newPage();
-
-    const runtime = new PlaywrightQuoteRuntime(browser, context, page);
+    }).catch(() => undefined);
+    await context.tracing.start({ screenshots: true, snapshots: true }).catch(() => undefined);
+    const runtime = new PlaywrightQuoteRuntime(
+      browser,
+      context,
+      page,
+      config.runtimeProvider,
+      config.session,
+      config.env,
+      browserbaseSession,
+    );
     runtime.registerNetworkLogging();
+    runtime.recordAction("runtime_env", {
+      env: {
+        BROWSERBASE_PROJECT_ID: config.env.BROWSERBASE_PROJECT_ID,
+        BROWSERBASE_REGION: config.env.BROWSERBASE_REGION,
+      },
+    });
     await artifacts.writeJson("session", {
       vendor: config.vendor,
       baseUrl: config.baseUrl,
-      storageStatePath: config.storageStatePath ?? null,
-      storageStateLoaded: Boolean(storageState),
+      sessionMode: config.session.mode,
+      sessionSource: config.session.source,
+      storageStatePath: config.session.storageStatePath,
       headed: config.headed,
+      runtimeProvider: config.runtimeProvider,
+      browserbaseSessionId: browserbaseSession?.id,
     });
     return runtime;
   }
@@ -189,6 +249,10 @@ export class PlaywrightQuoteRuntime {
   }
 
   async uploadPart(filePath: string): Promise<boolean> {
+    if (this.runtimeProvider === "browserbase" && this.browserbaseSession) {
+      return this.uploadPartViaBrowserbase(filePath);
+    }
+
     const input = this.page.locator('input[type="file"]').first();
     try {
       await input.setInputFiles(filePath, { timeout: 5000 });
@@ -242,6 +306,52 @@ export class PlaywrightQuoteRuntime {
     }
     await this.context.close().catch(() => undefined);
     await this.browser.close().catch(() => undefined);
+  }
+
+  private async uploadPartViaBrowserbase(filePath: string): Promise<boolean> {
+    const browserbaseSession = this.browserbaseSession;
+    if (!browserbaseSession) {
+      return false;
+    }
+
+    try {
+      const fileName = path.basename(filePath);
+      const cdp = await this.cdp();
+      const remoteFilePath = await uploadFileToBrowserbaseSession(
+        this.env,
+        browserbaseSession.id,
+        fileName,
+        await readFile(filePath),
+      );
+      const root = await cdp.send("DOM.getDocument");
+      const inputNode = await cdp.send("DOM.querySelector", {
+        nodeId: root.root.nodeId,
+        selector: 'input[type="file"]',
+      });
+      if (!inputNode.nodeId) {
+        return false;
+      }
+
+      await cdp.send("DOM.setFileInputFiles", {
+        files: [remoteFilePath],
+        nodeId: inputNode.nodeId,
+      });
+      this.recordAction("upload_part_browserbase", {
+        filePath,
+        remoteFilePath,
+        browserbaseSessionId: browserbaseSession.id,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async cdp(): Promise<CDPSession> {
+    if (!this.cdpSession) {
+      this.cdpSession = await this.context.newCDPSession(this.page);
+    }
+    return this.cdpSession;
   }
 }
 

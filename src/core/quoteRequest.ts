@@ -1,7 +1,9 @@
 import path from "node:path";
 import { z } from "zod";
 
+import { DEFAULT_MATERIAL, isMaterialSlug, SUPPORTED_MATERIALS, type MaterialSlug } from "./materials.js";
 import {
+  DEFAULT_VENDORS,
   SUPPORTED_VENDORS,
   type QuoteRequest,
   type QuoteRequestInput,
@@ -45,7 +47,7 @@ export function normalizeQuoteRequest(
       parsed.fileFormat ?? derivedFormat,
       profile.fileFormat,
     ),
-    material: normalizeLockedValue("material", parsed.material, profile.material),
+    material: normalizeMaterial(parsed.material, profile.material),
     finish: normalizeLockedValue("finish", parsed.finish, profile.finish),
     quantity: normalizeLockedNumber("quantity", parsed.quantity, profile.quantity),
     geography: normalizeLockedValue("geography", parsed.geography, profile.geography),
@@ -60,6 +62,19 @@ export function normalizeQuoteRequest(
   };
 
   return request;
+}
+
+function normalizeMaterial(
+  value: string | undefined,
+  defaultMaterial: MaterialSlug,
+): MaterialSlug {
+  const resolved = (value ?? defaultMaterial ?? DEFAULT_MATERIAL).toLowerCase();
+  if (!isMaterialSlug(resolved)) {
+    throw new Error(
+      `Unsupported material '${value ?? resolved}'. Supported materials: ${SUPPORTED_MATERIALS.join(", ")}.`,
+    );
+  }
+  return resolved;
 }
 
 function normalizeLockedValue<T extends string>(
@@ -88,7 +103,7 @@ function normalizeLockedNumber(
 
 function normalizeVendors(vendors?: VendorName[]): VendorName[] {
   if (!vendors || vendors.length === 0) {
-    return [...SUPPORTED_VENDORS];
+    return [...DEFAULT_VENDORS];
   }
   return Array.from(new Set(vendors));
 }

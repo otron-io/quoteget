@@ -4,11 +4,11 @@ import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 import { loadEnv } from "./config/env.js";
-import { browserStorageStateMap } from "./config/env.js";
+import { DEFAULT_MATERIAL, SUPPORTED_MATERIALS } from "./core/materials.js";
 import { QuoteOrchestrator } from "./core/orchestrator.js";
 import { loadDefaultProfile } from "./core/profile.js";
 import { renderQuoteTable } from "./core/table.js";
-import { BROWSER_VENDORS, SUPPORTED_VENDORS, type BrowserVendorName, type QuoteRequestInput, type QuoteRunResult, type VendorName } from "./core/types.js";
+import { BROWSER_VENDORS, DEFAULT_VENDORS, SUPPORTED_VENDORS, type BrowserVendorName, type QuoteRequestInput, type QuoteRunResult, type VendorName } from "./core/types.js";
 import { captureVendorAuthSession } from "./runtime/authCapture.js";
 import { runDoctor } from "./runtime/sessionDoctor.js";
 import { startWebServer } from "./server/app.js";
@@ -19,6 +19,8 @@ interface CliDeps {
   stdout: Pick<NodeJS.WriteStream, "write">;
   stderr: Pick<NodeJS.WriteStream, "write">;
   executeQuote: (input: QuoteRequestInput) => Promise<QuoteRunResult>;
+  submitQuote: (input: QuoteRequestInput) => Promise<QuoteRunResult>;
+  getRun: (runId: string) => QuoteRunResult | undefined;
   startServer: (port: number) => Promise<string>;
   captureAuth: (vendor: BrowserVendorName) => Promise<string>;
   runDoctor: () => Promise<{ ok: boolean; report: string }>;
@@ -35,12 +37,10 @@ export async function createCliDeps(cwd = process.cwd()): Promise<CliDeps> {
     stdout: process.stdout,
     stderr: process.stderr,
     executeQuote: (input) => orchestrator.execute(input),
+    submitQuote: (input) => orchestrator.submit(input),
+    getRun: (runId) => orchestrator.getRun(runId),
     startServer: (port) => startWebServer(orchestrator, port),
-    captureAuth: async (vendor) => {
-      const storageStatePath = browserStorageStateMap(env)[vendor];
-      await captureVendorAuthSession({ vendor, storageStatePath });
-      return storageStatePath;
-    },
+    captureAuth: async (vendor) => captureVendorAuthSession({ vendor, env }),
     runDoctor: async () => runDoctor(env),
     defaultPort: env.QUOTE_TOOL_PORT,
   };
@@ -49,32 +49,17 @@ export async function createCliDeps(cwd = process.cwd()): Promise<CliDeps> {
 export function createProgram(deps: CliDeps): Command {
   const program = new Command()
     .name("quote")
-    .description("Send one STEP file to multiple CNC quote vendors.")
-    .argument("[file]", "path to the STEP file")
-    .option("--material <material>", "material slug", "aluminum_6061")
-    .option("--quantity <count>", "quantity", parseInteger, 1)
-    .option("--vendors <vendors>", `comma-separated vendors (${SUPPORTED_VENDORS.join(", ")})`)
-    .option("--json", "emit raw vendor results")
-    .action(async (file, options) => {
-      if (!file) {
-        program.help();
-        return;
-      }
+    .description("Send one STEP file to multiple CNC quote vendors.");
 
-      const run = await deps.executeQuote({
-        filePath: file,
-        material: options.material,
-        quantity: options.quantity,
-        vendors: parseVendorList(options.vendors),
-      });
-
-      if (options.json) {
-        deps.stdout.write(`${JSON.stringify(run.results, null, 2)}\n`);
-        return;
-      }
-
-      deps.stdout.write(`${renderQuoteTable(run)}\n`);
-    });
+  configureQuoteCommand(
+    program.command("run").argument("<file>", "path to the STEP file").description("Request quotes from selected vendors."),
+    deps,
+  );
+  configureQuoteCommand(
+    program.command("all").argument("<file>", "path to the STEP file").description("Request quotes from every supported vendor."),
+    deps,
+    { forceAllVendors: true },
+  );
 
   program
     .command("serve")
@@ -110,9 +95,118 @@ export function createProgram(deps: CliDeps): Command {
   return program;
 }
 
+function configureQuoteCommand(
+  command: Command,
+  deps: CliDeps,
+  options?: { forceAllVendors?: boolean },
+): void {
+  command
+    .option(
+      "--material <material>",
+      `material slug (${SUPPORTED_MATERIALS.join(", ")})`,
+      DEFAULT_MATERIAL,
+    )
+    .option("--quantity <count>", "quantity", parseInteger, 1)
+    .option("--json", "emit raw vendor results");
+
+  if (!options?.forceAllVendors) {
+    command.option("--vendors <vendors>", `comma-separated vendors (${SUPPORTED_VENDORS.join(", ")})`);
+  }
+
+  command.action(async (file, commandOptions) => {
+      if (!file) {
+        command.help();
+        return;
+      }
+
+      const input: QuoteRequestInput = {
+        filePath: file,
+        material: commandOptions.material,
+        quantity: commandOptions.quantity,
+        vendors: options?.forceAllVendors
+          ? [...SUPPORTED_VENDORS]
+          : parseVendorList(commandOptions.vendors) ?? [...DEFAULT_VENDORS],
+      };
+
+      if (commandOptions.json) {
+        const run = await deps.executeQuote(input);
+        deps.stdout.write(`${JSON.stringify(run.results, null, 2)}\n`);
+        return;
+      }
+
+      const run = await streamQuoteRun(input, deps);
+      deps.stdout.write(`${renderQuoteTable(run)}\n`);
+    });
+}
+
 export async function runCli(argv: string[], deps: CliDeps): Promise<void> {
   const program = createProgram(deps);
-  await program.parseAsync(argv, { from: "user" });
+  await program.parseAsync(normalizeCliArgv(argv), { from: "user" });
+}
+
+function normalizeCliArgv(argv: string[]): string[] {
+  if (argv.length === 0) {
+    return argv;
+  }
+
+  const first = argv[0];
+  if (first.startsWith("-")) {
+    return argv;
+  }
+
+  const knownCommands = new Set(["run", "all", "serve", "auth", "doctor", "help"]);
+  if (knownCommands.has(first)) {
+    return argv;
+  }
+
+  return ["run", ...argv];
+}
+
+async function streamQuoteRun(input: QuoteRequestInput, deps: CliDeps): Promise<QuoteRunResult> {
+  let run = await deps.submitQuote(input);
+  deps.stdout.write(`Run ${run.runId} started.\n`);
+
+  for (const vendor of run.request.vendors) {
+    deps.stdout.write(`[${vendor}] running\n`);
+  }
+
+  const reported = new Set<string>();
+
+  while (run.status === "pending" || run.status === "running") {
+    reportNewResults(run, reported, deps);
+    await delay(1_000);
+    const latest = deps.getRun(run.runId);
+    if (!latest) {
+      break;
+    }
+    run = latest;
+  }
+
+  reportNewResults(run, reported, deps);
+  deps.stdout.write(`Run ${run.runId} ${run.status}.\n`);
+  return run;
+}
+
+function reportNewResults(
+  run: QuoteRunResult,
+  reported: Set<string>,
+  deps: Pick<CliDeps, "stdout">,
+): void {
+  for (const result of run.results) {
+    if (reported.has(result.vendor)) {
+      continue;
+    }
+    reported.add(result.vendor);
+    const price =
+      result.status === "quoted" && result.price !== undefined && result.currency
+        ? `${result.currency} ${result.price.toFixed(2)}`
+        : result.error ?? "-";
+    deps.stdout.write(`[${result.vendor}] ${result.status} ${price}\n`);
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function parseInteger(value: string): number {

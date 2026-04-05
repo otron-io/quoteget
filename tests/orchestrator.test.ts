@@ -13,10 +13,18 @@ const env: QuoteToolEnv = {
   QUOTE_TOOL_STORAGE_ROOT: "./storage",
   QUOTE_TOOL_HEADED: false,
   QUOTE_TOOL_PORT: 4310,
+  QUOTE_TOOL_SESSION_SECRET: undefined,
   HUBS_UNITS: "mm",
   HUBS_FINISH_SLUG: "as-machined-standard",
-  HUBS_MATERIAL_SUBSET_ID: 124,
+  HUBS_MATERIAL_SUBSET_ID: 86,
   HUBS_TECHNOLOGY_ID: 1,
+  BROWSERBASE_API_KEY: undefined,
+  BROWSERBASE_PROJECT_ID: undefined,
+  BROWSERBASE_REGION: "us-west-2",
+  BROWSERBASE_KEEP_ALIVE: false,
+  BROWSERBASE_ENABLE_PROXIES: false,
+  BROWSERBASE_SOLVE_CAPTCHAS: true,
+  BROWSERBASE_ADVANCED_STEALTH: false,
   XOMETRY_STORAGE_STATE: "/tmp/xometry.json",
   RAPIDDIRECT_STORAGE_STATE: "/tmp/rapiddirect.json",
   PROTOLABS_STORAGE_STATE: "/tmp/protolabs.json",
@@ -65,12 +73,45 @@ describe("QuoteOrchestrator", () => {
 
     const run = await orchestrator.execute({
       filePath: partPath,
+      vendors: ["hubs", "xometry", "rapiddirect", "protolabs"],
     });
 
     expect(run.status).toBe("completed");
     expect(run.results).toHaveLength(4);
     expect(run.results.find((item) => item.vendor === "protolabs")?.status).toBe(
       "manual_review_required",
+    );
+  });
+
+  it("keeps auth-required results as partial output without failing the run", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "quoting-tool-orch-auth-"));
+    const partPath = path.join(root, "part.step");
+    await writeFile(partPath, "solid", "utf8");
+
+    const adapters: Record<string, VendorAdapter> = {
+      hubs: createStubAdapter("hubs", { status: "quoted" }),
+      xometry: createStubAdapter("xometry", { status: "auth_required" }),
+      rapiddirect: createStubAdapter("rapiddirect", { status: "auth_required" }),
+      protolabs: createStubAdapter("protolabs", { status: "quoted" }),
+    };
+
+    const orchestrator = new QuoteOrchestrator(
+      {
+        ...env,
+        artifactRootAbs: root,
+        storageRootAbs: root,
+      },
+      profile,
+      adapters,
+    );
+
+    const run = await orchestrator.execute({
+      filePath: partPath,
+    });
+
+    expect(run.status).toBe("completed");
+    expect(run.results.find((item) => item.vendor === "rapiddirect")?.status).toBe(
+      "auth_required",
     );
   });
 });
