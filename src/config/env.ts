@@ -17,15 +17,41 @@ const envSchema = z.object({
     .optional()
     .transform((value) => value === "true"),
   QUOTE_TOOL_PORT: z.coerce.number().int().positive().default(4310),
+  QUOTE_TOOL_SESSION_SECRET: optionalString,
   HUBS_EMAIL: optionalString,
   HUBS_UNITS: z.enum(["mm", "inch"]).default("mm"),
   HUBS_FINISH_SLUG: z.string().default("as-machined-standard"),
-  HUBS_MATERIAL_SUBSET_ID: z.coerce.number().int().positive().default(124),
+  HUBS_MATERIAL_SUBSET_ID: z.coerce.number().int().positive().default(86),
   HUBS_TECHNOLOGY_ID: z.coerce.number().int().positive().default(1),
+  BROWSERBASE_API_KEY: optionalString,
+  BROWSERBASE_PROJECT_ID: optionalString,
+  BROWSERBASE_REGION: z.enum(["us-west-2", "us-east-1", "eu-central-1", "ap-southeast-1"]).default("us-west-2"),
+  BROWSERBASE_KEEP_ALIVE: z
+    .string()
+    .optional()
+    .transform((value) => value === "true"),
+  BROWSERBASE_ENABLE_PROXIES: z
+    .string()
+    .optional()
+    .transform((value) => value === "true"),
+  BROWSERBASE_SOLVE_CAPTCHAS: z
+    .string()
+    .optional()
+    .transform((value) => value !== "false"),
+  BROWSERBASE_ADVANCED_STEALTH: z
+    .string()
+    .optional()
+    .transform((value) => value === "true"),
   XOMETRY_STORAGE_STATE: z.string().default("./storage/auth/xometry.json"),
   RAPIDDIRECT_STORAGE_STATE: z.string().default("./storage/auth/rapiddirect.json"),
   PROTOLABS_STORAGE_STATE: z.string().default("./storage/auth/protolabs.json"),
   TWOCAPTCHA_API_KEY: optionalString,
+  STAGEHAND_MODEL: z.string().default("google/gemini-2.5-flash"),
+  STAGEHAND_API_KEY: optionalString,
+  STAGEHAND_USE_CACHE: z
+    .string()
+    .optional()
+    .transform((value) => value !== "false"),
 });
 
 export function loadEnv(cwd: string): QuoteToolEnv {

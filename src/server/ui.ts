@@ -1,4 +1,5 @@
-import type { QuoteRunResult } from "../core/types.js";
+import { DEFAULT_MATERIAL, listMaterialDefinitions } from "../core/materials.js";
+import { DEFAULT_VENDORS, SUPPORTED_VENDORS, type QuoteRunResult, type VendorName } from "../core/types.js";
 
 function escapeHtml(value: string): string {
   return value
@@ -9,23 +10,27 @@ function escapeHtml(value: string): string {
 }
 
 export function renderRunFragment(run: QuoteRunResult): string {
-  const rows =
-    run.results.length > 0
-      ? run.results
-          .map(
-            (result) => `
-              <tr>
-                <td>${escapeHtml(result.vendor)}</td>
-                <td>${escapeHtml(result.status)}</td>
-                <td>${result.price !== undefined && result.currency ? escapeHtml(`${result.currency} ${result.price.toFixed(2)}`) : "-"}</td>
-                <td>${result.leadTime ? escapeHtml(result.leadTime) : "-"}</td>
-                <td>${result.material ? escapeHtml(result.material) : "-"}</td>
-                <td>${result.error ? escapeHtml(result.error) : "-"}</td>
-              </tr>
-            `,
-          )
-          .join("")
-      : `<tr><td colspan="6">No vendor results yet.</td></tr>`;
+  const resultByVendor = new Map(run.results.map((result) => [result.vendor, result] as const));
+  const rows = run.request.vendors
+    .map((vendor) => {
+      const result = resultByVendor.get(vendor);
+      const status = result?.status ?? (run.status === "pending" || run.status === "running" ? "running" : "-");
+      const price = result?.price !== undefined && result.currency
+        ? `${result.currency} ${result.price.toFixed(2)}`
+        : "-";
+
+      return `
+        <tr>
+          <td>${escapeHtml(vendor)}</td>
+          <td>${escapeHtml(status)}</td>
+          <td>${escapeHtml(price)}</td>
+          <td>${result?.leadTime ? escapeHtml(result.leadTime) : "-"}</td>
+          <td>${result?.material ? escapeHtml(result.material) : "-"}</td>
+          <td>${result?.error ? escapeHtml(result.error) : "-"}</td>
+        </tr>
+      `;
+    })
+    .join("");
 
   return `
     <section class="run-fragment">
@@ -51,6 +56,19 @@ export function renderRunFragment(run: QuoteRunResult): string {
 }
 
 export function renderAppPage(): string {
+  const defaultVendors = new Set<VendorName>(DEFAULT_VENDORS);
+  const materialOptions = listMaterialDefinitions()
+    .map((material) => {
+      const selected = material.slug === DEFAULT_MATERIAL ? " selected" : "";
+      return `<option value="${escapeHtml(material.slug)}"${selected}>${escapeHtml(material.label)}</option>`;
+    })
+    .join("");
+  const vendorCheckboxes = SUPPORTED_VENDORS.map((vendor) => {
+    const label = formatVendorLabel(vendor);
+    const checked = defaultVendors.has(vendor) ? " checked" : "";
+    return `<label><input type="checkbox" name="vendors" value="${escapeHtml(vendor)}"${checked} /> ${escapeHtml(label)}</label>`;
+  }).join("");
+
   return `
     <!doctype html>
     <html lang="en">
@@ -167,7 +185,7 @@ export function renderAppPage(): string {
         <main>
           <section class="panel">
             <h1>One STEP file. Four vendor outcomes.</h1>
-            <p>The local UI calls the same backend as the CLI. Results are reported as real vendor states: quoted, manual review required, failed, or not supported.</p>
+            <p>The local UI calls the same backend as the CLI. Results are reported as real vendor states: quoted, manual review required, auth required, failed, or not supported.</p>
             <form id="quote-form">
               <label>
                 STEP file
@@ -177,7 +195,7 @@ export function renderAppPage(): string {
                 <label>
                   Material
                   <select name="material">
-                    <option value="aluminum_6061" selected>Aluminum 6061</option>
+                    ${materialOptions}
                   </select>
                 </label>
                 <label>
@@ -188,10 +206,7 @@ export function renderAppPage(): string {
                 </label>
               </div>
               <div class="vendors">
-                <label><input type="checkbox" name="vendors" value="hubs" checked /> Hubs</label>
-                <label><input type="checkbox" name="vendors" value="xometry" checked /> Xometry</label>
-                <label><input type="checkbox" name="vendors" value="rapiddirect" checked /> RapidDirect</label>
-                <label><input type="checkbox" name="vendors" value="protolabs" checked /> Protolabs</label>
+                ${vendorCheckboxes}
               </div>
               <button type="submit">Get Quotes</button>
             </form>
@@ -251,4 +266,17 @@ export function renderAppPage(): string {
       </body>
     </html>
   `;
+}
+
+function formatVendorLabel(vendor: VendorName): string {
+  switch (vendor) {
+    case "hubs":
+      return "Hubs";
+    case "xometry":
+      return "Xometry";
+    case "rapiddirect":
+      return "RapidDirect";
+    case "protolabs":
+      return "Protolabs";
+  }
 }

@@ -1,10 +1,10 @@
 import path from "node:path";
 
-import { storageStateExists } from "../config/env.js";
 import { ArtifactCollector } from "../core/artifactStore.js";
 import { fingerprintFile } from "../core/fingerprint.js";
 import { buildVendorNormalizedConfig } from "../core/normalizer.js";
 import type {
+  BrowserExecutionMode,
   BrowserVendorName,
   IntegrationTier,
   VendorExecutionContext,
@@ -13,12 +13,11 @@ import type {
   VendorQuoteResult,
   VendorStatus,
 } from "../core/types.js";
-import {
-  ensureProtolabsEphemeralSession,
-  ensureRapidDirectEphemeralSession,
-  ensureXometryEphemeralSession,
-} from "../runtime/ephemeralSessions.js";
 import { PlaywrightQuoteRuntime } from "../runtime/playwrightRuntime.js";
+import {
+  createBrowserSessionProvider,
+  type BrowserSessionDescriptor,
+} from "../runtime/browserSessionStore.js";
 
 export interface VendorAdapter<
   TPrepared = unknown,
@@ -64,7 +63,7 @@ export interface BrowserExtraction {
 }
 
 export interface BrowserStepResult {
-  outcome: "success" | "manual_review_required" | "failed" | "not_supported";
+  outcome: "success" | "manual_review_required" | "auth_required" | "failed" | "not_supported";
   note?: string;
   failureCode?: string;
   data?: Record<string, unknown>;
@@ -80,7 +79,9 @@ export interface BrowserStepLogEntry {
 
 export interface BrowserPreparedContext extends PreparedVendorContext {
   runtime: PlaywrightQuoteRuntime;
-  storageStatePath: string;
+  session: BrowserSessionDescriptor;
+  storageStatePath?: string;
+  executionMode: BrowserExecutionMode;
   partFingerprint: string;
   extraction: BrowserExtraction;
   stepLog: BrowserStepLogEntry[];
@@ -108,8 +109,30 @@ export abstract class BrowserVendorAdapter
   readonly integrationTier = "browser" as const;
   abstract readonly baseUrl: string;
 
-  protected abstract storageStatePath(env: VendorExecutionContext["env"]): string;
   protected abstract buildSteps(ctx: BrowserPreparedContext): BrowserVendorStep[];
+  protected supportsAnonymousProbe(): boolean {
+    return false;
+  }
+
+  protected runtimeProvider(
+    _execution: VendorExecutionContext,
+    _session: BrowserSessionDescriptor,
+  ): "local" | "browserbase" {
+    return "local";
+  }
+
+  protected async resolveSession(execution: VendorExecutionContext): Promise<BrowserSessionDescriptor> {
+    const sessionProvider = createBrowserSessionProvider(execution.env);
+    const session = await sessionProvider.resolve(this.vendor, this.supportsAnonymousProbe());
+    if (!session) {
+      throw new VendorFailure(
+        "auth_required",
+        `Missing browser session for ${this.vendor}.`,
+        "auth_required",
+      );
+    }
+    return session;
+  }
 
   async prepare(execution: VendorExecutionContext): Promise<BrowserPreparedContext> {
     const collector = await ArtifactCollector.create(execution.artifactRoot, [
@@ -117,48 +140,34 @@ export abstract class BrowserVendorAdapter
       this.vendor,
     ]);
     const normalizedConfig = buildVendorNormalizedConfig(execution.request, this.vendor);
-    const storageStatePath = this.storageStatePath(execution.env);
-    const hasSavedSession = storageStateExists(storageStatePath);
+    const session = await this.resolveSession(execution).catch(async (error) => {
+      const failure = error instanceof VendorFailure
+        ? error
+        : new VendorFailure("runtime_error", error instanceof Error ? error.message : String(error));
+      await collector.writeJson("preflight-error", {
+        failureCode: failure.code,
+        status: failure.status,
+        message: failure.message,
+      });
+      throw failure;
+    });
 
-    const runtime = await PlaywrightQuoteRuntime.create(
-      {
-        vendor: this.vendor,
-        baseUrl: this.baseUrl,
-        storageStatePath: hasSavedSession ? storageStatePath : undefined,
-        headed: execution.env.QUOTE_TOOL_HEADED,
-      },
-      collector,
-    );
-
-    if (!hasSavedSession) {
-      try {
-        if (this.vendor === "rapiddirect") {
-          await ensureRapidDirectEphemeralSession(runtime);
-        } else if (this.vendor === "xometry") {
-          await ensureXometryEphemeralSession(runtime);
-        } else if (this.vendor === "protolabs") {
-          const key = execution.env.TWOCAPTCHA_API_KEY;
-          if (!key) {
-            throw new VendorFailure(
-              "session_missing",
-              "Missing browser storage state for protolabs and no TWOCAPTCHA_API_KEY is set for automatic signup.",
-            );
-          }
-          await ensureProtolabsEphemeralSession(runtime, key);
-        }
-      } catch (error) {
-        await collector.writeJson("preflight-error", {
-          failureCode: "ephemeral_session_failed",
-          storageStatePath,
-          message: error instanceof Error ? error.message : String(error),
-        });
-        throw error instanceof VendorFailure
-          ? error
-          : new VendorFailure(
-              "ephemeral_session_failed",
-              error instanceof Error ? error.message : String(error),
-            );
-      }
+    let runtime: PlaywrightQuoteRuntime;
+    try {
+      runtime = await PlaywrightQuoteRuntime.create(
+        {
+          vendor: this.vendor,
+          baseUrl: this.baseUrl,
+          env: execution.env,
+          session,
+          headed: execution.env.QUOTE_TOOL_HEADED,
+          runtimeProvider: this.runtimeProvider(execution, session),
+        },
+        collector,
+      );
+    } catch (error) {
+      await session.cleanup?.();
+      throw error;
     }
 
     const prepared: BrowserPreparedContext = {
@@ -166,7 +175,9 @@ export abstract class BrowserVendorAdapter
       collector,
       normalizedConfig,
       runtime,
-      storageStatePath,
+      session,
+      storageStatePath: session.storageStatePath,
+      executionMode: session.mode,
       partFingerprint: await fingerprintFile(execution.inputFilePath),
       extraction: {},
       stepLog: [],
@@ -205,6 +216,13 @@ export abstract class BrowserVendorAdapter
 
       if (result.outcome === "manual_review_required") {
         status = "manual_review_required";
+        note = result.note;
+        failureCode = result.failureCode;
+        break;
+      }
+
+      if (result.outcome === "auth_required") {
+        status = "auth_required";
         note = result.note;
         failureCode = result.failureCode;
         break;
@@ -250,9 +268,10 @@ export abstract class BrowserVendorAdapter
       leadTime: raw.extraction.leadTime,
       material: raw.extraction.material ?? ctx.normalizedConfig.material,
       error:
-        raw.status === "failed" || raw.status === "not_supported"
-          ? raw.note ?? raw.extraction.error ?? raw.failureCode
-          : undefined,
+        raw.status === "quoted"
+          ? undefined
+          : raw.note ?? raw.extraction.error ?? raw.failureCode,
+      failureCode: raw.failureCode,
       integrationTier: this.integrationTier,
       quoteId: raw.extraction.quoteId,
       normalizedConfig: ctx.normalizedConfig,
@@ -305,6 +324,7 @@ export abstract class BrowserVendorAdapter
         vendor: this.vendor,
         status: failure.status,
         error: failure.note ?? failure.message,
+        failureCode: failure.code,
         integrationTier: this.integrationTier,
         normalizedConfig,
         artifactRef: {
@@ -315,6 +335,7 @@ export abstract class BrowserVendorAdapter
     } finally {
       if (prepared) {
         await prepared.runtime.shutdown(prepared.collector);
+        await prepared.session.cleanup?.();
       }
     }
   }
@@ -326,6 +347,10 @@ export function success(note?: string): BrowserStepResult {
 
 export function manualReview(note: string, failureCode = "manual_review_required"): BrowserStepResult {
   return { outcome: "manual_review_required", note, failureCode };
+}
+
+export function authRequired(note: string, failureCode = "auth_required"): BrowserStepResult {
+  return { outcome: "auth_required", note, failureCode };
 }
 
 export function notSupported(note: string, failureCode = "not_supported"): BrowserStepResult {
@@ -371,6 +396,8 @@ function materialFromVisibleText(text: string): string | undefined {
   const patterns = [
     /Aluminum 6061-T651\/T6/i,
     /Aluminum 6061/i,
+    /Aluminum 7075-T651\/T6/i,
+    /Aluminum 7075/i,
   ];
 
   for (const pattern of patterns) {
