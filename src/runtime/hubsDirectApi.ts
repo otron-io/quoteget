@@ -260,7 +260,7 @@ export async function runHubsDirectQuote(
     quoteId: getString(quoteData, "quote_number") ?? undefined,
     currency: subtotalMoney?.currency_code ?? undefined,
     price: centsToUnitAmount(subtotalMoney?.amount),
-    leadTime: shippingData[0]?.name ?? undefined,
+    leadTime: formatHubsQuoteLeadTime(quoteData),
     material: partLineItem?.material_subset_name ?? undefined,
     materialSubsetSlug: partLineItem?.material_subset_slug ?? null,
     materialSubsetName: partLineItem?.material_subset_name ?? null,
@@ -384,6 +384,19 @@ function getMoney(
 function getString(object: Record<string, unknown>, key: string): string | null {
   const value = object[key];
   return typeof value === "string" ? value : null;
+}
+
+function formatHubsQuoteLeadTime(quoteData: Record<string, unknown>): string | undefined {
+  const leadTimeDays = getNumber(quoteData, "lead_time");
+  if (leadTimeDays == null || leadTimeDays <= 0) {
+    return undefined;
+  }
+  return `${leadTimeDays} business days`;
+}
+
+function getNumber(object: Record<string, unknown>, key: string): number | null {
+  const value = object[key];
+  return typeof value === "number" ? value : null;
 }
 
 async function sleep(ms: number): Promise<void> {
