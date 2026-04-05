@@ -48,6 +48,7 @@ describe("runHubsDirectQuote JWT refresh while polling", () => {
     const pricedQuote = {
       data: {
         quote_number: "Q-1",
+        lead_time: 14,
         line_items: [
           {
             title: "part.step",
@@ -152,6 +153,7 @@ describe("runHubsDirectQuote JWT refresh while polling", () => {
     expect(result.status).toBe("quoted");
     expect(result.price).toBe(100);
     expect(result.quoteId).toBe("Q-1");
+    expect(result.leadTime).toBe("14 business days");
 
     const jwtCalls = fetchMock.mock.calls.filter(([u, init]) =>
       String(u).includes("/api/s/cnc/v1/jwt") && init?.method === "PATCH",
