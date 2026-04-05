@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { z } from "zod";
 
+import { SUPPORTED_MATERIALS } from "./materials.js";
 import type { QuoteToolProfile } from "./types.js";
 
 const profileSchema = z.object({
@@ -10,7 +11,7 @@ const profileSchema = z.object({
   description: z.string().min(1),
   process: z.literal("cnc"),
   fileFormat: z.literal("step"),
-  material: z.literal("aluminum_6061"),
+  material: z.enum(SUPPORTED_MATERIALS),
   finish: z.literal("standard"),
   quantity: z.number().int().positive(),
   geography: z.literal("us"),

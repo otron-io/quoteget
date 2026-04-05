@@ -1,14 +1,12 @@
-import { access } from "node:fs/promises";
-
 import { chromium } from "playwright";
 
 import type { BrowserVendorName, QuoteToolEnv } from "../core/types.js";
-import { browserStorageStateMap } from "../config/env.js";
 import { browserSessionDefinitions } from "./browserSessions.js";
+import { createBrowserSessionProvider } from "./browserSessionStore.js";
 
 interface DoctorCheck {
   vendor: BrowserVendorName;
-  storageStatePath: string;
+  source: string;
   exists: boolean;
   valid: boolean;
   detail: string;
@@ -17,42 +15,53 @@ interface DoctorCheck {
 export async function runDoctor(
   env: QuoteToolEnv,
 ): Promise<{ ok: boolean; report: string }> {
-  const storageMap = browserStorageStateMap(env) as Record<BrowserVendorName, string>;
+  const sessionProvider = createBrowserSessionProvider(env);
   const checks: DoctorCheck[] = [];
 
-  for (const vendor of Object.keys(storageMap) as BrowserVendorName[]) {
-    const storageStatePath = storageMap[vendor];
-    const exists = await fileExists(storageStatePath);
-    if (!exists) {
+  for (const vendor of ["xometry", "rapiddirect", "protolabs"] as BrowserVendorName[]) {
+    const session = await sessionProvider.resolve(vendor, vendor === "rapiddirect");
+    if (!session) {
       checks.push({
         vendor,
-        storageStatePath,
+        source: "none",
         exists: false,
         valid: false,
-        detail: "missing storage state",
+        detail: "missing stored session",
       });
       continue;
     }
 
-    const validation = await validateSession(vendor, storageStatePath);
+    if (session.mode === "anonymous_probe") {
+      checks.push({
+        vendor,
+        source: session.source,
+        exists: true,
+        valid: true,
+        detail: "anonymous probe available; no stored session required",
+      });
+      continue;
+    }
+
+    const validation = await validateSession(vendor, session.storageStatePath!);
     checks.push({
       vendor,
-      storageStatePath,
+      source: session.source,
       exists: true,
       valid: validation.valid,
       detail: validation.detail,
     });
+    await session.cleanup?.();
   }
 
-  const ok = checks.every((check) => check.exists && check.valid);
+  const ok = checks.every((check) => check.valid);
   const lines = [
-    ["Vendor".padEnd(12), "State File".padEnd(8), "Session".padEnd(8), "Detail"].join(" "),
+    ["Vendor".padEnd(12), "Source".padEnd(16), "Session".padEnd(8), "Detail"].join(" "),
     ...checks.map((check) =>
       [
         check.vendor.padEnd(12),
-        (check.exists ? "present" : "missing").padEnd(8),
+        (check.exists ? check.source : "missing").padEnd(16),
         (check.valid ? "valid" : "invalid").padEnd(8),
-        `${check.detail} (${check.storageStatePath})`,
+        check.detail,
       ].join(" "),
     ),
   ];
@@ -92,14 +101,5 @@ async function validateSession(
     };
   } finally {
     await browser.close().catch(() => undefined);
-  }
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await access(filePath);
-    return true;
-  } catch {
-    return false;
   }
 }

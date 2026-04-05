@@ -1,15 +1,18 @@
+import { getMaterialDefinition } from "./materials.js";
 import type { QuoteRequest, VendorName, VendorNormalizedConfig } from "./types.js";
 
 export function buildVendorNormalizedConfig(
   request: QuoteRequest,
   vendor: VendorName,
 ): VendorNormalizedConfig {
+  const material = getMaterialDefinition(request.material);
+
   switch (vendor) {
     case "hubs":
       return {
         vendor,
         process: "cnc-machining",
-        material: "cnc-machining_aluminum-6061",
+        material: material.hubs.material,
         finish: "as-machined-standard",
         quantity: request.quantity,
         geography: request.geography,
@@ -19,13 +22,15 @@ export function buildVendorNormalizedConfig(
         extra: {
           units: "mm",
           expectedCurrency: "USD",
+          hubsMaterialSubsetId: material.hubs.subsetId,
+          requestedMaterialLabel: material.label,
         },
       };
     case "xometry":
       return {
         vendor,
         process: "CNC machining",
-        material: "Aluminum 6061",
+        material: material.xometry.material,
         finish: "Standard",
         quantity: request.quantity,
         geography: request.geography,
@@ -38,7 +43,7 @@ export function buildVendorNormalizedConfig(
       return {
         vendor,
         process: "CNC machining",
-        material: "Aluminum 6061",
+        material: material.rapiddirect.material,
         finish: "Brushed (#120)",
         quantity: request.quantity,
         geography: request.geography,
@@ -51,7 +56,7 @@ export function buildVendorNormalizedConfig(
       return {
         vendor,
         process: "CNC machining",
-        material: "Aluminum 6061-T651/T6",
+        material: material.protolabs.material,
         finish: "Standard",
         quantity: request.quantity,
         geography: request.geography,

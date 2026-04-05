@@ -1,13 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  classifyProtolabsQuote,
-  extractProtolabsReviewPricing,
-} from "../src/vendors/protolabs.js";
+import { extractFromQuoteSnapshot } from "../src/vendors/protolabs.js";
 
-describe("classifyProtolabsQuote", () => {
-  it("classifies bracket-like quote-request-needed states as manual review", () => {
-    const result = classifyProtolabsQuote({
+describe("extractFromQuoteSnapshot", () => {
+  it("returns error for quote-request-needed snapshots", () => {
+    const result = extractFromQuoteSnapshot({
       number: "9101-803",
       totalPrice: null,
       quoteRequestNeeded: true,
@@ -19,22 +16,16 @@ describe("classifyProtolabsQuote", () => {
           quoteRequestNeeded: true,
           minimumConfigurationNeeded: false,
           isReadyForPricing: true,
-          statusChecklist: [
-            { code: "ConfigurePart", state: "Checked" },
-            { code: "RequestAnalysisAndPricing", state: "Unchecked" },
-            { code: "ChooseOrDismissThreading", state: "Unchecked" },
-          ],
-          concerns: null,
         },
       ],
     });
 
-    expect(result.kind).toBe("manual_review_required");
-    expect(result.blockerReason).toContain("RequestAnalysisAndPricing");
+    expect(result).not.toBeNull();
+    expect(result?.error).toMatch(/rfq|quote request/i);
   });
 
-  it("classifies priced states as quoted", () => {
-    const result = classifyProtolabsQuote({
+  it("returns price and lead time for priced snapshots", () => {
+    const result = extractFromQuoteSnapshot({
       number: "5559-695",
       totalPrice: 305.66,
       quoteRequestNeeded: false,
@@ -46,31 +37,31 @@ describe("classifyProtolabsQuote", () => {
           quoteRequestNeeded: false,
           minimumConfigurationNeeded: false,
           isReadyForPricing: true,
+          totalPrice: 305.66,
+          fulfillmentOptions: [
+            {
+              isActive: true,
+              priority: "standard",
+              manufacturingTime: { daysToManufacture: 5 },
+            },
+          ],
         },
       ],
     });
 
-    expect(result).toEqual({ kind: "quoted" });
+    expect(result?.price).toBe(305.66);
+    expect(result?.currency).toBe("USD");
+    expect(result?.quoteId).toBe("5559-695");
+    expect(result?.leadTime).toBe("5 business days");
   });
-});
 
-describe("extractProtolabsReviewPricing", () => {
-  it("parses the visible review-page order summary", () => {
-    const parsed = extractProtolabsReviewPricing(`
-      Ready to Order!
-      Subtotal $241.64
-      Shipping $35.60
-      Estimated Tax $28.42
-      Total $305.66
-      Standard Tue, Apr 7
-      Sharp internal corners with minimum tool radius
-    `);
+  it("returns null when no line items are present", () => {
+    const result = extractFromQuoteSnapshot({
+      totalPrice: null,
+      quoteRequestNeeded: false,
+      lineItems: [],
+    });
 
-    expect(parsed.currency).toBe("USD");
-    expect(parsed.price).toBe(241.64);
-    expect(parsed.shippingIfVisible).toBe(35.6);
-    expect(parsed.taxIfVisible).toBe(28.42);
-    expect(parsed.totalIfVisible).toBe(305.66);
-    expect(parsed.leadTime).toBe("Standard Tue, Apr 7");
+    expect(result).toBeNull();
   });
 });
